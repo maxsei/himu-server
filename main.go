@@ -72,10 +72,11 @@ outer:
 			log.Error(err)
 			continue
 		}
-		// if _, err := io.Copy(os.Stdout, buf); err != nil {
+		// if _, err := io.Copy(os.Stdout, conn); err != nil {
 		// 	log.Error(err)
 		// 	return
 		// }
+		// continue
 		seq := []string{
 			"{",
 			"os",
@@ -91,6 +92,21 @@ outer:
 				continue outer
 			}
 		}
+		var tsms int64
+		timestampToken, err := dec.Token();
+		if  err != nil {
+			log.Error(err)
+			return
+		}
+		if timestampToken != "Timestamp" {
+			log.Error("expected token 'Timestamp' got %v", timestampToken)
+			return
+		}
+		if err := dec.Decode(&tsms); err != nil {
+			log.Error(err)
+			return
+		}
+		var records []Record
 		for dec.More() {
 			sensor, err := dec.Token()
 			if err != nil {
@@ -102,41 +118,47 @@ outer:
 				log.Error(err)
 				return
 			}
-			tsms := time.Now().UnixMilli()
-			log.Infof("%s: %v", sensor, values)
-			InsertRecord(db, &Record{
-				serverStart: serverStart,
-				sensor: fmt.Sprint(sensor),
-				tsms:   tsms,
-				values: values,
-			})
+			records = append(records,
+				Record{
+					serverStart: serverStart,
+					sensor:      fmt.Sprint(sensor),
+					tsms:        tsms,
+					values:      values,
+				})
+		}
+		log.Infof("received %d records at %v", len(records), time.UnixMilli(tsms))
+		if err := InsertRecords(db, records); err != nil {
+			log.Error(err)
+			return
 		}
 	}
 }
 
 type Record struct {
-	serverStart   int64
-	sensor string
-	tsms   int64
-	values []float32
+	serverStart int64
+	sensor      string
+	tsms        int64
+	values      []float32
 }
 
-func InsertRecord(db_ *sql.DB, r *Record) error {
-	db, err := db_.Begin()
+func InsertRecords(db *sql.DB, rr []Record) error {
+	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
-	defer db.Rollback()
-	for coord, value := range r.values {
-		if _, err := db.Exec(`
+	defer tx.Rollback()
+	for _, r := range rr {
+		for coord, value := range r.values {
+			if _, err := tx.Exec(`
 				INSERT INTO sensor_data (
 					server_start_ts_ms, ts_ms, sensor, value, coord
 				) VALUES (
 					?, ?, ?, ?, ?
 				);
 			`, r.serverStart, r.tsms, r.sensor, value, coord); err != nil {
-			return err
+				return err
+			}
 		}
 	}
-	return db.Commit()
+	return tx.Commit()
 }
